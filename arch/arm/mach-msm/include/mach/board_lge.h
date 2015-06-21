@@ -50,19 +50,11 @@ typedef enum {
 
 hw_rev_type lge_get_board_revno(void);
 
-#ifdef CONFIG_LCD_KCAL
-struct kcal_data {
-	int red;
-	int green;
-	int blue;
-};
-
 struct kcal_platform_data {
 	int (*set_values) (int r, int g, int b);
 	int (*get_values) (int *r, int *g, int *b);
 	int (*refresh_display) (void);
 };
-#endif
 
 int __init lge_get_uart_mode(void);
 
