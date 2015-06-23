@@ -17,7 +17,6 @@
   #include <asm/memory.h>
 #endif
 
->>>>>>> d9e93c4... Implement kexec-hardboot
 /*
  * Debugging stuff
  *
