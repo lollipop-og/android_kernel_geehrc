@@ -1,16 +1,18 @@
 /*
  * arch/arm/kernel/autosmp.c
  *
- * automatically hotplug/unplug multiple cpu cores
+ * automatically hotplugs the multiple cpu cores on and off 
  * based on cpu load and suspend state
  * 
  * based on the msm_mpdecision code by
  * Copyright (c) 2012-2013, Dennis Rassmann <showp1984@gmail.com>
  *
- * Copyright (C) 2013-2014, Rauf Gungor, http://github.com/mrg666
- * rewrite to simplify and optimize, Jul. 2013, http://goo.gl/cdGw6x
- * optimize more, generalize for n cores, Sep. 2013, http://goo.gl/448qBz
- * generalize for all arch, rename as autosmp, Dec. 2013, http://goo.gl/x5oyhy
+ * major revision: rewrite to simplify and optimize
+ * July 2013, http://goo.gl/cdGw6x
+ * revision: further optimizations, generalize for any number of cores
+ * September 2013, http://goo.gl/448qBz
+ * revision: generalize for other arm arch, rename as autosmp.c
+ * December 2013, http://goo.gl/x5oyhy
  * 
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -29,9 +31,10 @@
 #include <linux/hrtimer.h>
 
 #define DEBUG 0
+#define STATS 0
 
-#define ASMP_TAG "AutoSMP: "
-#define ASMP_STARTDELAY 20000
+#define ASMP_TAG	"[ASMP]: "
+#define ASMP_STARTDELAY	20000
 
 struct asmp_cpudata_t {
 	long long unsigned int times_hotplugged;
@@ -61,7 +64,7 @@ static struct asmp_param_struct {
 	.cycle_down = 3,
 };
 
-static unsigned int cycle = 0;
+static unsigned int cycle;
 static int enabled = 1;
 
 static void __cpuinit asmp_work_fn(struct work_struct *work) {
@@ -107,19 +110,21 @@ static void __cpuinit asmp_work_fn(struct work_struct *work) {
 		    (cycle >= asmp_param.cycle_down)) { // but not so soon 
 			cpu_down(slow_cpu);
 			cycle = 0;
-#if DEBUG
-			pr_info(ASMP_TAG"CPU[%d] off\n", slow_cpu);
+#if STATS
 			per_cpu(asmp_cpudata, cpu).times_hotplugged += 1;
 #endif
+#if DEBUG
+			pr_info(ASMP_TAG"CPU[%d] off\n", slow_cpu);
+#endif
 		}
-	} /* else do nothing */
+	}
 
 	queue_delayed_work(asmp_workq, &asmp_work,
 			   msecs_to_jiffies(asmp_param.delay));
 }
 
 static void asmp_early_suspend(struct early_suspend *h) {
-	int cpu;
+	int cpu = 1;
 
 	/* unplug online cpu cores */
 	if (asmp_param.scroff_single_core)
@@ -131,11 +136,11 @@ static void asmp_early_suspend(struct early_suspend *h) {
 	if (enabled)
 		cancel_delayed_work_sync(&asmp_work);
 
-	pr_info(ASMP_TAG"suspended\n");
+	pr_info(ASMP_TAG"autosmp suspended.\n");
 }
 
 static void __cpuinit asmp_late_resume(struct early_suspend *h) {
-	int cpu;
+	int cpu = 1;
 
 	/* hotplug offline cpu cores */
 	if (asmp_param.scroff_single_core)
@@ -148,7 +153,7 @@ static void __cpuinit asmp_late_resume(struct early_suspend *h) {
 		queue_delayed_work(asmp_workq, &asmp_work, 
 				msecs_to_jiffies(asmp_param.delay));
 
-	pr_info(ASMP_TAG"resumed\n");
+	pr_info(ASMP_TAG"autosmp resumed.\n");
 }
 
 static struct early_suspend __refdata asmp_early_suspend_handler = {
@@ -158,20 +163,20 @@ static struct early_suspend __refdata asmp_early_suspend_handler = {
 };
 
 static int __cpuinit set_enabled(const char *val, const struct kernel_param *kp) {
-	int ret;
-	int cpu;
+	int ret = 0;
+	int cpu = 1;
 
 	ret = param_set_bool(val, kp);
 	if (enabled) {
 		queue_delayed_work(asmp_workq, &asmp_work,
 				msecs_to_jiffies(asmp_param.delay));
-		pr_info(ASMP_TAG"enabled\n");
+		pr_info(ASMP_TAG"autosmp enabled\n");
 	} else {
 		cancel_delayed_work_sync(&asmp_work);
 		for (cpu = 1; cpu < nr_cpu_ids; cpu++)
 			if (!cpu_online(cpu)) 
 				cpu_up(cpu);
-		pr_info(ASMP_TAG"disabled\n");
+		pr_info(ASMP_TAG"autosmp disabled\n");
 	}
 	return ret;
 }
@@ -182,7 +187,7 @@ static struct kernel_param_ops module_ops = {
 };
 
 module_param_cb(enabled, &module_ops, &enabled, 0644);
-MODULE_PARM_DESC(enabled, "hotplug/unplug cpu cores based on cpu load");
+MODULE_PARM_DESC(enabled, "hotplug cpu cores based on demand");
 
 /***************************** SYSFS START *****************************/
 #define define_one_global_ro(_name)					\
@@ -248,11 +253,11 @@ static struct attribute_group asmp_attr_group = {
 	.attrs = asmp_attributes,
 	.name = "conf",
 };
-#if DEBUG
+#if STATS
 static ssize_t show_times_hotplugged(struct kobject *a, 
 					struct attribute *b, char *buf) {
 	ssize_t len = 0;
-	int cpu;
+	int cpu = 0;
 
 	for_each_possible_cpu(cpu) {
 		len += sprintf(buf + len, "%i %llu\n", cpu, 
@@ -275,8 +280,9 @@ static struct attribute_group asmp_stats_attr_group = {
 /****************************** SYSFS END ******************************/
 
 static int __init asmp_init(void) {
-	int cpu, rc;
+	int cpu, rc, err = 0;
 
+	cycle = 0;
 	for_each_possible_cpu(cpu)
 		per_cpu(asmp_cpudata, cpu).times_hotplugged = 0;
 
@@ -295,7 +301,7 @@ static int __init asmp_init(void) {
 		rc = sysfs_create_group(asmp_kobject, &asmp_attr_group);
 		if (rc)
 			pr_warn(ASMP_TAG"ERROR, create sysfs group");
-#if DEBUG
+#if STATS
 		rc = sysfs_create_group(asmp_kobject, &asmp_stats_attr_group);
 		if (rc)
 			pr_warn(ASMP_TAG"ERROR, create sysfs stats group");
@@ -303,7 +309,7 @@ static int __init asmp_init(void) {
 	} else
 		pr_warn(ASMP_TAG"ERROR, create sysfs kobj");
 
-	pr_info(ASMP_TAG"initialized\n");
-	return 0;
+	pr_info(ASMP_TAG"%s init complete.", __func__);
+	return err;
 }
 late_initcall(asmp_init);
